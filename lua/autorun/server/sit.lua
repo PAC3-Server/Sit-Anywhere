@@ -14,18 +14,13 @@ local SittingOnPlayer2 = CreateConVar("sitting_can_sit_on_player_ent","1",{FCVAR
 local PlayerDamageOnSeats = CreateConVar("sitting_can_damage_players_sitting","0",{FCVAR_NOTIFY})
 local AllowWeaponsInSeat = CreateConVar("sitting_allow_weapons_in_seat","0",{FCVAR_NOTIFY})
 local AdminOnly = CreateConVar("sitting_admin_only","0",{FCVAR_NOTIFY})
+local FixLegBug = CreateConVar("sitting_fix_leg_bug","1",{FCVAR_NOTIFY})
 local META = FindMetaTable("Player")
 local EMETA = FindMetaTable("Entity")
 
 local function ShouldAlwaysSit(ply)
-	if not ms then return end
-	if not ms.GetTheaterPlayers then return end
-	if not ms.GetTheaterPlayers() then return end
-	return ms.GetTheaterPlayers()[ply]
+	return hook.Run("ShouldAlwaysSit",ply)
 end
-
-
-
 
 local function Sit(ply, pos, ang, parent, parentbone,  func, exit)
 	ply:ExitVehicle()
@@ -44,10 +39,7 @@ local function Sit(ply, pos, ang, parent, parentbone,  func, exit)
 	vehicle:SetKeyValue("limitview","0")
 	vehicle:Spawn()
 	vehicle:Activate()
-	if CPPI then
-		vehicle:CPPISetOwner(Entity(0))
-	end
-
+	
 	-- Let's try not to crash
 	vehicle:SetMoveType(MOVETYPE_PUSH)
 	vehicle:GetPhysicsObject():Sleep()
@@ -96,7 +88,8 @@ local function Sit(ply, pos, ang, parent, parentbone,  func, exit)
 
 	vehicle.removeonexit = true
 	vehicle.exit = exit
-
+	vehicle.sittingPly = ply
+	
 	local ang = vehicle:GetAngles()
 	ply:SetEyeAngles(Angle(0,90,0))
 	if func then
@@ -210,7 +203,6 @@ local model_blacklist = {  -- I need help finding out why these crash
 }
 
 function META.Sit(ply, EyeTrace, ang, parent, parentbone, func, exit)
-
 	if EyeTrace == nil then
 		EyeTrace = ply:GetEyeTrace()
 	elseif type(EyeTrace)=="Vector" then
@@ -294,7 +286,7 @@ function META.Sit(ply, EyeTrace, ang, parent, parentbone, func, exit)
 	EyeTrace2Tr.mins = Vector(-5,-5,-5)
 	EyeTrace2Tr.maxs = Vector(5,5,5)
 	local EyeTrace2 = util.TraceHull(EyeTrace2Tr)
-	if EyeTrace2.Entity ~= EyeTrace.Entity then return end
+	--if EyeTrace2.Entity ~= EyeTrace.Entity then return end
 
 	local ang = EyeTrace.HitNormal:Angle() + Angle(-270, 0, 0)
 	if(math.abs(ang.pitch) <= 15) then
@@ -337,7 +329,7 @@ function META.Sit(ply, EyeTrace, ang, parent, parentbone, func, exit)
 					ply:ChatPrint(ent:Name()..' has disabled sitting!')
 					return
 				end
-				if sitting_disallow_on_me then
+				if ent:IsPlayer() and sitting_disallow_on_me then
 					ply:ChatPrint("You've disabled sitting on players!")
 					return
 				end
@@ -377,7 +369,7 @@ function META.Sit(ply, EyeTrace, ang, parent, parentbone, func, exit)
 					ply:ChatPrint(ent:Name()..' has disabled sitting!')
 					return
 				end
-				if sitting_disallow_on_me then
+				if ent:IsPlayer() and sitting_disallow_on_me then
 					ply:ChatPrint("You've disabled sitting on players!")
 					return
 				end
@@ -413,29 +405,32 @@ concommand.Add("sit",function(ply, cmd, args)
 	sitcmd(ply)
 end)
 
+local function UndoSitting(self, ply)
+	local prev = ply.sitting_allowswep
+	if prev~=nil then
+		ply.sitting_allowswep = nil
+		ply:SetAllowWeaponsInVehicle(prev)
+	end
+	if(self.exit) then
+		self.exit(ply)
+	end
+	self:Remove()
+end
+
 hook.Add("CanExitVehicle","Remove_Seat",function(self, ply)
 	if not self.playerdynseat then return end
 	if CurTime()<NextUse[ply] then return false end
+
 	NextUse[ply] = CurTime() + 1
 
-	local function OnExit()
-		local prev = ply.sitting_allowswep
-		if prev~=nil then
-			ply.sitting_allowswep = nil
-			ply:SetAllowWeaponsInVehicle(prev)
-		end
-		if(self.exit) then
-			self.exit(ply)
-		end
-		self:Remove()
-	end
+	local OnExit = function() UndoSitting(self, ply) end
 
 	if ShouldAlwaysSit(ply) then
 		-- Movie gamemode
 		if ply.UnStuck then
 			local pos,ang = LocalToWorld(Vector(0,36,20),Angle(),self:GetPos(),Angle(0,self:GetAngles().yaw,0))
+		
 			ply:UnStuck(pos, pos, OnExit)
-			return false
 		else
 			timer.Simple(0, function()
 				ply:SetPos(self:GetPos()+Vector(0,0,36))
@@ -446,7 +441,6 @@ hook.Add("CanExitVehicle","Remove_Seat",function(self, ply)
 		local oldpos, oldang = self:LocalToWorld(self.oldpos), self:LocalToWorldAngles(self.oldang)
 		if ply.UnStuck then
 			ply:UnStuck(oldpos, OnExit)
-			return false
 		else
 			timer.Simple(0, function()
 				ply:SetPos(oldpos)
@@ -489,6 +483,14 @@ hook.Add("PlayerEnteredVehicle","unsits",function(pl,veh)
 end)
 
 hook.Add("EntityRemoved","Sitting_EntityRemoved",function(ent)
+	if FixLegBug:GetBool() then
+		if ent.playerdynseat then
+			if IsValid(ent.sittingPly) then
+				UndoSitting(ent, ent.sittingPly)
+			end
+		end
+	end
+	
 	for k,v in pairs(ents.FindByClass("prop_vehicle_prisoner_pod")) do
 		if(v:GetParent() == ent) then
 			if IsValid(v:GetDriver()) then
